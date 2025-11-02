@@ -22,10 +22,10 @@ import numpy as np
 from tqdm import tqdm
 
 # ======= 默认路径/超参（与 v2 一致） =======
-NORMAL_DIR = 'dataset/Data/Normal0607.csv'
-SERVICE_DIR = 'dataset/Data/Service_fault.csv'
-NODE_DIR    = 'dataset/Data/Node_fault.csv'
-OUT_DIR     = 'dataset/aiops_v4_1e5all'
+NORMAL_DIR = 'E:\ZJU\AIOps\Projects\TraDNN\dataset\SplitTrace06-07/2025-06-07_normal_traces.csv'
+SERVICE_DIR = 'E:\ZJU\AIOps\Projects\TraDNN\dataset\SplitTrace06-07/2025-06-07_service.csv'
+NODE_DIR    = 'E:\ZJU\AIOps\Projects\TraDNN\dataset\SplitTrace06-07/2025-06-07_node.csv'
+OUT_DIR     = 'dataset/aiops_06-07_2e5'
 
 PHASE_A_UNSUP_DEFAULT     = 100000    # 正常 trace cap（0 表示不截断）
 PHASE_B_PER_FAULT_DEFAULT = 0        # 每细类 cap（0 表示不截断）

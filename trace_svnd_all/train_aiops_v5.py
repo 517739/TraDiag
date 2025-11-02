@@ -450,7 +450,8 @@ def main():
 
     # 训练 Stage A
     log("Stage A: 无监督VAE（normal-only）训练开始 …")
-    best_val_roc, best_thr = -1.0, 0.0
+    best_train_loss = float('inf')
+    best_thr = 0.5  # 默认阈值
     total_steps_nominal = args.steps_per_epoch if args.steps_per_epoch > 0 else tr_len
 
     for ep in range(1, args.epochs_a + 1):
@@ -458,7 +459,8 @@ def main():
         total_steps = args.steps_per_epoch if args.steps_per_epoch > 0 else tr_len
         pbar = tqdm(tr_loader_a, ncols=100, desc=f"[A][ep{ep:02d}]", total=total_steps)
         loss_sum = {'loss': 0.0, 'l_lat': 0.0, 'l_stat': 0.0, 'l_struct': 0.0, 'l_kl': 0.0}
-        steps = 0; accum = 0
+        steps = 0
+        accum = 0
         opt.zero_grad(set_to_none=True)
 
         for g, y in pbar:
@@ -524,65 +526,50 @@ def main():
             if args.steps_per_epoch > 0 and steps >= args.steps_per_epoch:
                 break
 
+        # 计算平均训练损失
+        avg_train_loss = loss_sum['loss'] / steps if steps > 0 else float('inf')
+
         # 验证（传入 loss_mode，保持与训练口径一致）
         pr, roc, f1r, thr = evaluate_stage_a(
             model, va_loader_a, mu, sd, dev,
             topk=args.topk, alpha_lat=args.alpha_lat, beta_stat=args.beta_stat, recall_floor=0.95,
-            loss_mode=args.a_loss  # [PATCH]
+            loss_mode=args.a_loss
         )
-        log(f"[A][ep{ep:02d}] ROC-AUC={roc:.4f}  PR-AUC={pr:.4f}  F1@R≥95%={f1r:.4f}  thr={thr:.6f}")
-        # === ADD: accf1 模式下，基于“验证集”选一次阈值，仅打印参考，不影响早停 ===
-        if args.metric_mode == "accf1":
-            yv, sv = collect_bin_labels_and_scores(model, va_loader_a, dev)
-            if args.thr_strategy == "val_recall95":
-                thr_v, p_v, r_v, f1_v, k_v = select_threshold_at_recall(yv, sv, target_recall=0.95, fallback="max_f1")
-                tag = "R>=0.95,F1-max"
-            elif args.thr_strategy == "val_maxf1":
-                thr_v, p_v, r_v, f1_v, k_v = select_threshold_at_recall(yv, sv, target_recall=0.0, fallback="max_f1")
-                tag = "F1-max"
-            else:
-                thr_v, p_v, r_v, f1_v, k_v = select_threshold_at_recall(yv, sv, target_recall=0.0, fallback="youden")
-                tag = "YoudenJ"
-            log(f"[A][ep{ep:02d}] [Val-thr @{tag}] thr={thr_v:.6f}  P={p_v:.4f} R={r_v:.4f} F1={f1_v:.4f}")
+        log(f"[A][ep{ep:02d}] Train Loss={avg_train_loss:.4f}, ROC-AUC={roc:.4f}, PR-AUC={pr:.4f}, F1@R≥95%={f1r:.4f}, thr={thr:.6f}")
 
-        # 早停
-        improved = (roc - best_val_roc) > args.delta_a
-        if improved:
-            best_val_roc, best_thr = roc, thr
+        # 早停策略：基于训练损失而不是验证集指标
+        improved = (best_train_loss - avg_train_loss) > args.delta_a
+        if improved or ep == 1:  # 第一个epoch总是保存
+            if improved:
+                best_train_loss = avg_train_loss
+                best_thr = thr
             torch.save({'model': model.state_dict(), 'thr': best_thr, 'mu': mu, 'sd': sd},
                        os.path.join(args.report_dir, 'stageA_best.pt'))
-            log(f"[A] 保存最优 (ROC-AUC={best_val_roc:.4f}, thr={best_thr:.6f}) -> stageA_best.pt")
+            log(f"[A] 保存最优 (Train Loss={best_train_loss:.4f}, thr={best_thr:.6f}) -> stageA_best.pt")
             no_improve_a = 0
         else:
             no_improve_a = no_improve_a + 1 if 'no_improve_a' in locals() else 1
             if args.early_stop_a and no_improve_a >= args.patience_a:
-                log(f"[A] Early stop at ep{ep:02d} (no improve {no_improve_a} ≥ {args.patience_a})")
+                log(f"[A] Early stop at ep{ep:02d} (训练损失无改善 {no_improve_a} ≥ {args.patience_a})")
                 break
 
         torch.cuda.empty_cache()
 
     # 测试
     if args.metric_mode == "accf1":
-        # 1) 用验证集固定一次阈值（锁定测试集口径）
-        yv, sv = collect_bin_labels_and_scores(model, va_loader_a, dev)
-        if args.thr_strategy == "val_recall95":
-            thr_fix, p_v, r_v, f1_v, _ = select_threshold_at_recall(yv, sv, target_recall=0.95, fallback="max_f1")
-            tag = "R>=0.95,F1-max"
-        elif args.thr_strategy == "val_maxf1":
-            thr_fix, p_v, r_v, f1_v, _ = select_threshold_at_recall(yv, sv, target_recall=0.0, fallback="max_f1")
-            tag = "F1-max"
-        else:
-            thr_fix, p_v, r_v, f1_v, _ = select_threshold_at_recall(yv, sv, target_recall=0.0, fallback="youden")
-            tag = "YoudenJ"
-        log(f"[A][TEST] 固定阈值(来自验证集 @{tag}) thr={thr_fix:.6f}")
+        # 使用训练过程中得到的最佳阈值，而不是从验证集重新选择
+        thr_fix = best_thr
+        log(f"[A][TEST] 使用训练阶段最佳阈值 thr={thr_fix:.6f}")
 
         # 2) 在测试集上按固定阈值计算 Acc/Prec/Rec/F1 + 混淆矩阵
-        yt, st = collect_bin_labels_and_scores(model, te_loader_a, dev)
+        yt, st = collect_unsup_labels_and_scores(
+            model, te_loader_a, dev, mu, sd,
+            args.a_loss, args.topk, args.alpha_lat, args.beta_stat
+        )
         m = binary_metrics_from_scores(yt, st, thr_fix)
         log(f"[A][TEST @thr={m['thr']:.6f}] Acc={m['acc']:.4f}  Prec={m['prec']:.4f}  Rec={m['rec']:.4f}  F1={m['f1']:.4f}")
         cm = m["cm"]
         log(f"Confusion: TN={cm['TN']}  FP={cm['FP']}  FN={cm['FN']}  TP={cm['TP']}")
-
         append_result_txt(os.path.join(args.report_dir, 'result.txt'),
                           f"[Stage A][ACC/F1] thr={m['thr']:.6f} Acc={m['acc']:.4f} Prec={m['prec']:.4f} Rec={m['rec']:.4f} F1={m['f1']:.4f}\n")
 

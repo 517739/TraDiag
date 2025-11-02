@@ -478,7 +478,7 @@ def evaluate_stage_b(model, loader, device, return_details: bool = False, type_n
 
 @torch.no_grad()
 def evaluate_stage_a(model, loader, mu, sd, device, topk=0.2, alpha_lat=2.0, beta_stat=1.0, recall_floor=0.95,
-                     loss_mode: str = 'nll'):  # [PATCH] 新增 loss_mode
+                     loss_mode: str = 'nll'):
     model.eval()
     ys, ps = [], []
     for g, y in loader:
@@ -504,15 +504,39 @@ def evaluate_stage_a(model, loader, mu, sd, device, topk=0.2, alpha_lat=2.0, bet
     mask = np.isfinite(y_score)
     y_true, y_score = y_true[mask], y_score[mask]
 
-    if len(y_true) == 0 or len(np.unique(y_true)) < 2:
-        print("[StageA][WARN] y_true has <2 classes after filtering; skip AUC/PR.")
-        prauc = float(np.mean(y_true)) if len(y_true) else 0.0
-        roc = prauc
-        thr = float(np.median(y_score)) if len(y_score) else 0.0
-        y_pred = (y_score >= thr).astype(int) if len(y_score) else np.array([])
-        f1r = float(f1_score(y_true, y_pred)) if (len(y_true) and y_true.sum() > 0) else 0.0
+    if len(y_true) == 0:
+        print("[StageA][WARN] No valid scores after filtering; skip AUC/PR.")
+        return 0.0, 0.0, 0.0, 0.5
+
+    # 检查是否只有单一类别
+    unique_classes = np.unique(y_true)
+    if len(unique_classes) < 2:
+        print(
+            f"[StageA][WARN] y_true has only {len(unique_classes)} class(es) after filtering; using score distribution for threshold.")
+
+        # 当只有单一类别时，使用异常得分的分布来确定阈值
+        if len(y_score) > 0:
+            # 使用异常得分的第95百分位数作为阈值（假设正常数据的异常得分较低）
+            thr = float(np.percentile(y_score, 95))
+
+            # 对于单一类别的情况，设置默认的AUC值
+            if unique_classes[0] == 0:  # 全是正常数据
+                prauc = 0.5
+                roc = 0.5
+                f1r = 0.0
+            else:  # 全是异常数据
+                prauc = 1.0
+                roc = 1.0
+                f1r = 1.0
+        else:
+            thr = 0.5
+            prauc = 0.5
+            roc = 0.5
+            f1r = 0.0
+
         return prauc, roc, f1r, thr
 
+    # 正常的多类别情况（原有逻辑）
     prauc = float(average_precision_score(y_true, y_score))
     try:
         roc = float(roc_auc_score(y_true, y_score))
@@ -862,6 +886,29 @@ def collect_bin_labels_and_scores(model, loader, device):
             s = torch.sigmoid(out["logit_bin"].view(-1)).cpu().numpy()
             ys.append(y); ss.append(s)
     return np.concatenate(ys), np.concatenate(ss)
+
+# === NEW: 用 Stage-A 的无监督口径收集 (y_true, score) ===
+def collect_unsup_labels_and_scores(model, loader, device, mu, sd, loss_mode, topk, alpha_lat, beta_stat):
+    import numpy as np
+    model.eval()
+    ys, ss = [], []
+    with torch.no_grad():
+        for g, y in loader:
+            g = g.to(device)
+            out = model(g, vae_mode=True)
+            if loss_mode == 'mse':
+                s = _graph_anomaly_score_mse(
+                    g, out['lat_hat'], out['stat_hat'], mu, sd,
+                    topk=topk, alpha_lat=alpha_lat, beta_stat=beta_stat
+                )
+            else:
+                s = _graph_anomaly_score_nll(
+                    g, out['lat_mu_hat'], out['lat_logvar_hat'], out['stat_hat'],
+                    topk=topk, alpha_lat=alpha_lat, beta_stat=beta_stat
+                )
+            ys.append(int(y['y_bin'].item()))
+            ss.append(float(s))
+    return np.asarray(ys), np.asarray(ss)
 
 def binary_metrics_from_scores(y_true, scores, thr):
     """

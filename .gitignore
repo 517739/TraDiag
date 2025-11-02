@@ -1,3 +1,7 @@
-trace_svnd_all/dataset/*
 trace_service_diag/dataset/*
+
 trace_svnd_diag/dataset/*
+
+trace_svnd_all/dataset/*
+trace_svnd_all/new/*
+trace_svnd_all/tracegnn/*
